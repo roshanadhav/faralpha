@@ -7,28 +7,64 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
+    
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
-
-    - name: Set up SSH
+      
+    - name: Set up Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Create deployment directory
+      run: |
+        mkdir -p deployment
+        cp index.js package.json package-lock.json deployment/
+        cd deployment
+        
+    - name: Setup SSH
       uses: webfactory/ssh-agent@v0.7.0
       with:
-        ssh-private-key: ${{ secrets.VM_SSH_KEY }}
-
-    - name: Copy files to VM
+        ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+        
+    - name: Setup known hosts
       run: |
-        ssh -o StrictHostKeyChecking=no azureuser@172.203.225.136 "sudo rm -rf ~/app && mkdir ~/app"
-        scp -r . azureuser@172.203.225.136:~/app
-
-    - name: Install and run API on VM
+        mkdir -p ~/.ssh
+        ssh-keyscan -H 172.203.225.136 >> ~/.ssh/known_hosts
+        
+    - name: Deploy to VM
       run: |
-        ssh azureuser@172.203.225.136 << EOF
-          cd ~/app
-          sudo apt update
-          sudo apt install -y nodejs npm
-          npm install
-          sudo fuser -k 80/tcp || true
-          sudo nohup node index.js > output.log 2>&1 &
-        EOF
+        # Create a deployment script
+        echo '#!/bin/bash
+        set -e
+        
+        # Create app directory if it doesn't exist
+        mkdir -p ~/app
+        
+        # Stop existing process if running
+        pm2 stop app || true
+        
+        # Copy files to app directory
+        cp -r ./* ~/app/
+        
+        # Install dependencies
+        cd ~/app
+        npm ci --production
+        
+        # Start the application with PM2
+        pm2 start index.js --name app || pm2 restart app
+        ' > deploy.sh
+        
+        # Make the script executable
+        chmod +x deploy.sh
+        
+        # Copy deployment files to VM
+        scp -r deployment/* azureuser@172.203.225.136:~/
+        scp deploy.sh azureuser@172.203.225.136:~/
+        
+        # Execute deployment script on VM
+        ssh azureuser@172.203.225.136 'bash ~/deploy.sh'
